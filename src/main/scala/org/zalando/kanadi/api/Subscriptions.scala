@@ -5,7 +5,6 @@ import java.time.OffsetDateTime
 import java.util.concurrent.ConcurrentHashMap
 
 import akka.NotUsed
-import defaults._
 import akka.http.scaladsl.HttpExt
 import akka.http.scaladsl.marshalling.Marshal
 import akka.http.scaladsl.model.Uri.Query
@@ -20,20 +19,20 @@ import com.typesafe.scalalogging.{Logger, LoggerTakingImplicit}
 import de.heikoseeberger.akkahttpcirce.ErrorAccumulatingCirceSupport._
 import enumeratum._
 import io.circe.java8.time._
-import io.circe.{Decoder, Encoder, JsonObject}
 import io.circe.syntax._
-import org.zalando.kanadi.api.defaults._
-import org.zalando.kanadi.models._
+import io.circe.{Decoder, Encoder, JsonObject}
 import org.mdedetrich.akka.stream.support.CirceStreamSupport
-import org.mdedetrich.webmodels.{FlowId, OAuth2TokenProvider, Problem}
 import org.mdedetrich.webmodels.circe._
+import org.mdedetrich.webmodels.{FlowId, OAuth2TokenProvider, Problem}
+import org.zalando.kanadi.api.defaults._
 import org.zalando.kanadi.models
+import org.zalando.kanadi.models._
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration.FiniteDuration
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
+import scala.util.{Failure, Success, Try}
 
 final case class SubscriptionAuthorization(admins: List[AuthorizationAttribute], readers: List[AuthorizationAttribute])
 
@@ -384,6 +383,12 @@ object Subscriptions {
   final case class ConnectionClosedCallback(connectionClosedCallback: ConnectionClosedData => Unit)
 
   /**
+  * Default connection callback which does nothing
+    */
+  val NoOpConnectionClosedCallBack: ConnectionClosedCallback = ConnectionClosedCallback { _ => ()
+  }
+
+  /**
     *
     * @param flowId Current flow id
     * @param subscriptionId Current Stream Subscription id
@@ -483,6 +488,8 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
     http: HttpExt,
     materializer: Materializer)
     extends {
+
+  import Subscriptions._
   protected val logger: LoggerTakingImplicit[FlowId] = Logger.takingImplicit[FlowId](classOf[Subscriptions])
   private val baseUri_                               = Uri(baseUri.toString)
 
@@ -506,7 +513,9 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
                 }
       entity   <- Marshal(subscription).to[RequestEntity]
       request  = HttpRequest(HttpMethods.POST, uri, headers, entity)
-      _        = logger.debug(request.toString)
+      _ = if (logger.underlying.isDebugEnabled) {
+        logger.debug(request.toString)
+      }
       response <- http.singleRequest(request).map(decodeCompressed)
       result <- {
         if (response.status.isSuccess()) {
@@ -597,7 +606,9 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
                     }
                 }
       request  = HttpRequest(HttpMethods.GET, uri, headers)
-      _        = logger.debug(request.toString)
+      _ = if (logger.underlying.isDebugEnabled) {
+        logger.debug(request.toString)
+      }
       response <- http.singleRequest(request).map(decodeCompressed)
       result <- {
         if (response.status.isSuccess()) {
@@ -898,13 +909,12 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
       .withQuery(
         Query(
           Map(
-            "max_uncommitted_events" -> maxUncommittedEvents.map(_.toString),
-            "batch_limit"            -> batchLimit.map(_.toString),
-            "stream_limit"           -> streamLimit.map(_.toString),
-            "batch_flush_timeout"    -> batchFlushTimeout.map(_.toSeconds.toString),
-            "stream_timeout"         -> streamTimeout.map(_.toSeconds.toString),
-            "stream_keep_alive_limit" -> streamKeepAliveLimit
-              .map(_.toString)
+            "max_uncommitted_events"  -> maxUncommittedEvents.map(_.toString),
+            "batch_limit"             -> batchLimit.map(_.toString),
+            "stream_limit"            -> streamLimit.map(_.toString),
+            "batch_flush_timeout"     -> batchFlushTimeout.map(_.toSeconds.toString),
+            "stream_timeout"          -> streamTimeout.map(_.toSeconds.toString),
+            "stream_keep_alive_limit" -> streamKeepAliveLimit.map(_.toString)
           ).collect {
             case (k, Some(v)) => (k, v)
           })
@@ -939,11 +949,11 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
           case StatusCodes.NotFound =>
             Unmarshal(response.entity.httpEntity.withContentType(ContentTypes.`application/json`))
               .to[Problem]
-              .map(x => throw Subscriptions.Errors.SubscriptionNotFound(x))
+              .map(x => throw Errors.SubscriptionNotFound(x))
           case StatusCodes.Conflict =>
             Unmarshal(response.entity.httpEntity.withContentType(ContentTypes.`application/json`))
               .to[Problem]
-              .map(x => throw Subscriptions.Errors.NoEmptySlotsOrCursorReset(x))
+              .map(x => throw Errors.NoEmptySlotsOrCursorReset(x))
           case _ =>
             if (response.status.isSuccess()) {
               for {
@@ -981,7 +991,7 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
                             uniqueKillSwitch: UniqueKillSwitch): Unit =
     killSwitches((subscriptionId, streamId)) = uniqueKillSwitch
 
-  private def getStreamUri(subscriptionId: SubscriptionId, streamConfig: Subscriptions.StreamConfig) = {
+  private def getStreamUri(subscriptionId: SubscriptionId, streamConfig: StreamConfig) = {
     baseUri_
       .withPath(baseUri_.path / "subscriptions" / subscriptionId.id.toString / "events")
       .withQuery(
@@ -1026,17 +1036,14 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
     * @return
     */
   def eventsStreamedSource[T](subscriptionId: SubscriptionId,
-                              connectionClosedCallback: Subscriptions.ConnectionClosedCallback =
-                                Subscriptions.ConnectionClosedCallback { _ =>
-                                  ()
-                                },
-                              streamConfig: Subscriptions.StreamConfig = Subscriptions.StreamConfig())(
+                              connectionClosedCallback: ConnectionClosedCallback = NoOpConnectionClosedCallBack,
+                              streamConfig: StreamConfig = StreamConfig())(
       implicit
       decoder: Decoder[List[Event[T]]],
       flowId: FlowId,
       executionContext: ExecutionContext,
-      eventStreamSupervisionDecider: Subscriptions.EventStreamSupervisionDecider)
-    : Future[Subscriptions.NakadiSource[T]] = {
+      eventStreamSupervisionDecider: EventStreamSupervisionDecider)
+    : Future[NakadiSource[T]] = {
     val uri           = getStreamUri(subscriptionId, streamConfig)
     val streamHeaders = getBaseHeaders
 
@@ -1101,7 +1108,7 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
             .viaMat(KillSwitches.single)(Keep.right)
             .alsoTo(Sink.onComplete { data =>
               val cancelledByClient = data match {
-                case util.Failure(CancelledByClient(_, _)) => true
+                case Failure(CancelledByClient(_, _)) => true
                 case _                                     => false
               }
               cleanup(streamId, cancelledByClient)
@@ -1118,20 +1125,19 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
               case Right(result) => result
             }
             .withAttributes(ActorAttributes.supervisionStrategy(eventStreamSupervisionDecider
-              .decider(Subscriptions
-                .EventStreamContext(flowId, subscriptionId, streamId, this))))
+              .decider(EventStreamContext(flowId, subscriptionId, streamId, this))))
 
-          Future.successful(Subscriptions.NakadiSource(streamId, graph, request))
+          Future.successful(NakadiSource(streamId, graph, request))
         } else {
           response.status match {
             case StatusCodes.NotFound =>
               Unmarshal(response.entity.httpEntity.withContentType(ContentTypes.`application/json`))
                 .to[Problem]
-                .map(x => throw Subscriptions.Errors.SubscriptionNotFound(x))
+                .map(x => throw Errors.SubscriptionNotFound(x))
             case StatusCodes.Conflict =>
               Unmarshal(response.entity.httpEntity.withContentType(ContentTypes.`application/json`))
                 .to[Problem]
-                .map(x => throw Subscriptions.Errors.NoEmptySlotsOrCursorReset(x))
+                .map(x => throw Errors.NoEmptySlotsOrCursorReset(x))
             case _ =>
               processNotSuccessful(response)
           }
@@ -1157,12 +1163,9 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
     * @return The StreamId for this Stream
     */
   def eventsStreamed[T](subscriptionId: SubscriptionId,
-                        eventCallback: Subscriptions.EventCallback[T],
-                        connectionClosedCallback: Subscriptions.ConnectionClosedCallback =
-                          Subscriptions.ConnectionClosedCallback { _ =>
-                            ()
-                          },
-                        streamConfig: Subscriptions.StreamConfig = Subscriptions.StreamConfig(),
+                        eventCallback: EventCallback[T],
+                        connectionClosedCallback: ConnectionClosedCallback = NoOpConnectionClosedCallBack,
+                        streamConfig: StreamConfig = StreamConfig(),
                         modifySourceFunction: Option[
                           Source[SubscriptionEvent[T], UniqueKillSwitch] => Source[SubscriptionEvent[T],
                                                                                    UniqueKillSwitch]] = None)(
@@ -1173,10 +1176,7 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
   ): Future[StreamId] = {
 
     @inline def sourceWithAdjustments(source: Source[SubscriptionEvent[T], UniqueKillSwitch]) =
-      modifySourceFunction match {
-        case None             => source
-        case Some(sourceFunc) => sourceFunc(source)
-      }
+      modifySourceFunction.map(_(source)).getOrElse(source)
 
     def handleSubscriptionEvent(streamId: StreamId, request: HttpRequest, subscriptionEvent: SubscriptionEvent[T]) = {
       val currentFlowId =
@@ -1205,10 +1205,10 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
         logger.debug(s"$logDetails Failure executing callback, $e")
 
       eventCallback match {
-        case Subscriptions.EventCallback.simple(cb, _) =>
+        case EventCallback.simple(cb, _) =>
           try {
             cb(
-              Subscriptions.EventCallbackData(
+              EventCallbackData(
                 subscriptionEvent,
                 streamId,
                 request,
@@ -1219,11 +1219,11 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
             case NonFatal(e) => logCallbackFailure(e)
           }
 
-        case Subscriptions.EventCallback.successAlways(cb, _) =>
+        case EventCallback.successAlways(cb, _) =>
           commitCursors(subscriptionId, SubscriptionCursor(List(subscriptionEvent.cursor)), streamId)(
             currentFlowId.getOrElse(randomFlowId()),
             implicitly).onComplete {
-            case scala.util.Failure(scala.util.control.NonFatal(e)) =>
+            case Failure(NonFatal(e)) =>
               logger.error(
                 s"Error committing cursors SubscriptionId: ${subscriptionId.id.toString}, StreamId: ${streamId.id}",
                 e)
@@ -1232,7 +1232,7 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
           logAlwaysSuccess()
           try {
             cb(
-              Subscriptions.EventCallbackData(
+              EventCallbackData(
                 subscriptionEvent,
                 streamId,
                 request,
@@ -1242,13 +1242,13 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
           } catch {
             case NonFatal(e) => logCallbackFailure(e)
           }
-        case Subscriptions.EventCallback.successPredicate(cb, _) =>
+        case EventCallback.successPredicate(cb, _) =>
           logger.debug(s"$logDetails Executing callback")
 
           val predicate = try {
             val f = Some(
               cb(
-                Subscriptions.EventCallbackData(
+                EventCallbackData(
                   subscriptionEvent,
                   streamId,
                   request,
@@ -1267,7 +1267,7 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
               commitCursors(subscriptionId, SubscriptionCursor(List(subscriptionEvent.cursor)), streamId)(
                 currentFlowId.getOrElse(randomFlowId()),
                 implicitly).onComplete {
-                case scala.util.Failure(scala.util.control.NonFatal(e)) =>
+                case Failure(NonFatal(e)) =>
                   logger.error(
                     s"Error committing cursors SubscriptionId: ${subscriptionId.id.toString}, StreamId: ${streamId.id}",
                     e)
@@ -1279,11 +1279,11 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
             case _ =>
           }
 
-        case Subscriptions.EventCallback.successPredicateFuture(cb, _) =>
+        case EventCallback.successPredicateFuture(cb, _) =>
           val eventualPredicate = try {
             val f = Some(
               cb(
-                Subscriptions.EventCallbackData(
+                EventCallbackData(
                   subscriptionEvent,
                   streamId,
                   request,
@@ -1304,7 +1304,7 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
                   commitCursors(subscriptionId, SubscriptionCursor(List(subscriptionEvent.cursor)), streamId)(
                     currentFlowId.getOrElse(randomFlowId()),
                     implicitly).onComplete {
-                    case scala.util.Failure(scala.util.control.NonFatal(e)) =>
+                    case Failure(NonFatal(e)) =>
                       logger.error(
                         s"Error committing cursors SubscriptionId: ${subscriptionId.id.toString}, StreamId: ${streamId.id}",
                         e)
@@ -1354,19 +1354,16 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
     * @return Initial Stream Id
     */
   def eventsStreamedManaged[T](subscriptionId: SubscriptionId,
-                               eventCallback: Subscriptions.EventCallback[T],
-                               connectionClosedCallback: Subscriptions.ConnectionClosedCallback =
-                                 Subscriptions.ConnectionClosedCallback { _ =>
-                                   ()
-                                 },
-                               streamConfig: Subscriptions.StreamConfig = Subscriptions.StreamConfig(),
+                               eventCallback: EventCallback[T],
+                               connectionClosedCallback: ConnectionClosedCallback = NoOpConnectionClosedCallBack,
+                               streamConfig: StreamConfig = StreamConfig(),
                                modifySourceFunction: Option[
                                  Source[SubscriptionEvent[T], UniqueKillSwitch] => Source[SubscriptionEvent[T],
                                                                                           UniqueKillSwitch]] = None)(
       implicit decoder: Decoder[List[Event[T]]],
       flowId: FlowId = randomFlowId(),
       executionContext: ExecutionContext,
-      eventStreamSupervisionDecider: Subscriptions.EventStreamSupervisionDecider
+      eventStreamSupervisionDecider: EventStreamSupervisionDecider
   ): Future[StreamId] = {
     eventsStreamed[T](
       subscriptionId,
@@ -1396,7 +1393,7 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
         streamId
       }
       .recoverWith {
-        case Subscriptions.Errors.NoEmptySlotsOrCursorReset(_) =>
+        case Errors.NoEmptySlotsOrCursorReset(_) =>
           logger.info(
             s"No empty slots/cursor reset, reconnecting in ${kanadiHttpConfig.noEmptySlotsCursorResetRetryDelay
               .toString()}, SubscriptionId: ${subscriptionId.id.toString}")
@@ -1412,17 +1409,14 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
   }
 
   def eventsStreamedSourceManaged[T](subscriptionId: SubscriptionId,
-                                     connectionClosedCallback: Subscriptions.ConnectionClosedCallback =
-                                       Subscriptions.ConnectionClosedCallback { _ =>
-                                         ()
-                                       },
-                                     streamConfig: Subscriptions.StreamConfig = Subscriptions.StreamConfig())(
+                                     connectionClosedCallback: ConnectionClosedCallback = NoOpConnectionClosedCallBack,
+                                     streamConfig: StreamConfig = StreamConfig())(
       implicit
       decoder: Decoder[List[Event[T]]],
       flowId: FlowId,
       executionContext: ExecutionContext,
-      eventStreamSupervisionDecider: Subscriptions.EventStreamSupervisionDecider)
-    : Future[Subscriptions.NakadiSource[T]] = {
+      eventStreamSupervisionDecider: EventStreamSupervisionDecider)
+    : Future[NakadiSource[T]] = {
     eventsStreamedSource[T](
       subscriptionId,
       connectionClosedCallback,
@@ -1433,7 +1427,7 @@ case class Subscriptions(baseUri: URI, oAuth2TokenProvider: Option[OAuth2TokenPr
         nakadiSource
       }
       .recoverWith {
-        case Subscriptions.Errors.NoEmptySlotsOrCursorReset(_) =>
+        case Errors.NoEmptySlotsOrCursorReset(_) =>
           logger.info(
             s"No empty slots/cursor reset, reconnecting in ${kanadiHttpConfig.noEmptySlotsCursorResetRetryDelay
               .toString()}, SubscriptionId: ${subscriptionId.id.toString}")
